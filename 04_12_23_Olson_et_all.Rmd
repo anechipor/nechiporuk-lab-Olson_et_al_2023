@@ -1,0 +1,731 @@
+---
+title: "nechiporuk_10x_analysis"
+author: "nlc, avn"
+date: "4/27/2020; updated 8/18/22; 4/12/23"
+output:   
+  html_document:
+    toc: true
+    toc_depth: 2
+    toc_float: true
+    toc_collapsed: true
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, fig.align = 'center', out.width = '90%')
+```
+
+<style>
+    body .main-container {
+        max-width: 2160px;
+    }
+</style>
+
+# Set up
+
+## Load libraries
+```{r}
+library(tidyverse)
+library(Seurat)
+
+```
+
+## Load data
+```{r}
+data_folder <- "pLLP_matrix"
+
+pLLP_data <- Read10X(data.dir = data_folder)
+
+pLLP <- CreateSeuratObject(counts = pLLP_data,
+                           project = "pllP8k", min.cells = 3, min.features = 200)
+
+```
+
+# 'Standard' Seurat analysis
+
+## Assign mitochondrial percent
+
+*NOTE (NLC):* zebrafish mitochondrial genes have a lowercase prefix, using the regex pattern '^mt-' appeared to work, however only 13 mitchondrial genes are present.
+# cox3 was not annoted as mitochondrial gene
+
+```{r}
+pLLP[["percent.mt"]] <- PercentageFeatureSet(pLLP, pattern = "^mt-|^COX3$")
+# Visualize QC metrics as a violin plot
+VlnPlot(pLLP, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3, pt.size = 0)
+```
+
+## QC visualization
+
+*Note (AN):* FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+
+Run this chunk to manually set cutoffs:
+
+
+```{r, eval = TRUE}
+nCount_RNA_limits <- c(1e3, 7.5e4)
+
+nFeature_RNA_limits <- c(1900, 6000)
+
+percent_mt_limits <- c(0, 5)
+```
+
+
+```{r}
+
+FeatureScatter(pLLP, feature1 = "nCount_RNA", feature2 = "percent.mt", group.by = "orig.ident")+
+  geom_vline(xintercept = nCount_RNA_limits, linetype = 'dashed', size = 1.5)+
+  geom_hline(yintercept = percent_mt_limits, linetype = 'dashed', size = 1.5)
+
+FeatureScatter(pLLP, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", group.by = "orig.ident")+
+  geom_vline(xintercept = nCount_RNA_limits, linetype = 'dashed', size = 1.5)+
+  geom_hline(yintercept = nFeature_RNA_limits, linetype = 'dashed', size = 1.5)
+
+pLLP_metadata <- pLLP@meta.data
+
+ggplot(pLLP_metadata, aes(x = nCount_RNA, y = nFeature_RNA))+
+  geom_point(alpha = 0.1)+
+  geom_density2d()+
+  geom_vline(xintercept = nCount_RNA_limits, linetype = 'dashed', size = 1.5)+
+  geom_hline(yintercept = nFeature_RNA_limits, linetype = 'dashed', size = 1.5)+
+  scale_x_log10()
+
+ggplot(pLLP_metadata, aes(x = nCount_RNA/nFeature_RNA, y = nFeature_RNA))+
+  geom_point(alpha = 0.1)+
+  geom_density2d()+
+  geom_hline(yintercept = nFeature_RNA_limits, linetype = 'dashed', size = 1.5)
+
+
+
+```
+
+## Subset data
+
+```{r}
+#Display counts before pruning
+print('Cell count before pruning:')
+table(pLLP@meta.data$orig.ident)
+
+pLLP <- subset(pLLP, subset = nFeature_RNA > min(nFeature_RNA_limits) & nFeature_RNA < max(nFeature_RNA_limits) & nCount_RNA > min(nCount_RNA_limits) & nCount_RNA < max(nCount_RNA_limits) & percent.mt > min(percent_mt_limits) & percent.mt < max(percent_mt_limits))
+
+#Display counts after pruning
+print('Cell count after pruning:')
+table(pLLP@meta.data$orig.ident)
+```
+
+
+## Normalize, identify variable features and scale data
+
+```{r}
+pLLP <- NormalizeData(pLLP)
+pLLP <- FindVariableFeatures(pLLP, selection.method = 'vst', nfeatures = 2000)
+top10_variablefeatures <- head(VariableFeatures(pLLP), 10)
+
+var_feature_plot <- VariableFeaturePlot(pLLP)
+var_feature_plot <- LabelPoints(plot = var_feature_plot, points = top10_variablefeatures, repel = TRUE)
+
+pLLP <- ScaleData(pLLP, features = rownames(pLLP))
+
+```
+
+## PCA
+
+```{r}
+pLLP <- RunPCA(pLLP)
+VizDimLoadings(pLLP, dims = 1:4, reduction = 'pca')
+ElbowPlot(pLLP, ndims = 50)+
+  geom_vline(xintercept = 20.5)
+
+```
+
+## Neighbor assignment, clustering and UMAP visualization
+```{r}
+pLLP <- FindNeighbors(pLLP, dims = 1:20)
+pLLP <- FindClusters(pLLP, resolution = .8)
+pLLP <- RunUMAP(pLLP, dims = 1:20)
+
+DimPlot(pLLP, label = TRUE, label.size = 4)+
+  coord_equal()+NoLegend()
+```
+
+## Look at cluster identity versus condition
+
+```{r}
+pLLP.meta <- pLLP@meta.data
+
+ggplot(pLLP.meta, aes(x = seurat_clusters, fill = orig.ident))+
+  geom_bar(position = 'dodge')
+```
+
+
+## Rename clusters 
+```{r}
+#annotation for 20 dim and resolution 0.8
+new.cluster.ids <- c("0-pLLP", "1-neural progenitors",  "2-neural progenitors", "3-telencephalon or retina", "4-olfactory", "5-epibranchial", "6-epidermis", "7-pLLP", "8-olfactory", "9-pLLP", "10-eye", "11-fin epidermis", "12-neural progenitors", "13-retina", "14-olfactory", "15-vessel", "16-hair cells", "17-pronephros", "18-otic", "19-muscle", "20-olfactory", "21-hair cells")
+names(new.cluster.ids) <- levels(pLLP)
+pLLP_names <- RenameIdents(pLLP, new.cluster.ids)
+DimPlot(pLLP_names, reduction = "umap", label = TRUE, label.size = 3.5, pt.size = 0.5) + NoLegend()+coord_equal()
+
+```
+
+## Identify features for each unsupervised cluster 
+
+```{r}
+pLLP_markers <- FindAllMarkers(pLLP, only.pos = TRUE, logfc.threshold = 0.5)
+
+top_genes_per_cluster <- pLLP_markers %>% group_by(cluster) %>%
+  top_n(n = 5, wt = avg_log2FC)
+
+DoHeatmap(pLLP_names, features = top_genes_per_cluster$gene, size = 3)
+
+```
+
+## Identify features for pLLP clusters
+
+```{r}
+c0_markers <- FindMarkers(pLLP, ident.1 = "0", only.pos = TRUE)
+c0_markers$gene <- rownames(c0_markers)
+top_c0 <- c0_markers  %>% top_n(n = 5, wt = avg_log2FC) 
+write.csv(c0_markers, file = "outputs/topC0.csv")
+
+c7_markers <- FindMarkers(pLLP, ident.1 = c("7"), only.pos = TRUE)
+c7_markers$gene <- rownames(c7_markers)
+top_c7 <- c7_markers  %>% top_n(n = 5, wt = avg_log2FC) 
+write.csv(c7_markers, file = "outputs/topC7.csv")
+
+```
+
+# Directed analysis
+
+```{r}
+#FACs markers
+
+cxcr4b <- FeaturePlot(pLLP, features = c("cxcr4b"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/cxcr4b.jpeg", cxcr4b, dpi = 300)
+
+cldnb <- FeaturePlot(pLLP, features = c("cldnb"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/cldnb.jpeg", cldnb, dpi = 300)
+
+# general pLLP markers
+hmx2_L <- FeaturePlot(pLLP, features = c("hmx2"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/hmx2_L.jpeg", hmx2_L, dpi = 300)
+
+hmx3a_L <- FeaturePlot(pLLP, features = c("hmx3a"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/hmx3a_L.jpeg", hmx3a_L, dpi = 300)
+
+kremen1_L <- FeaturePlot(pLLP, features = c("kremen1"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/kremen1_L.jpeg", kremen1_L, dpi = 300)
+
+sdprb_L <- FeaturePlot(pLLP, features = c("sdprb"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/sdprb_L.jpeg", sdprb_L, dpi = 300)
+
+#proliferation markers
+pcna_L <- FeaturePlot(pLLP, features = c("pcna"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/pcna_L.jpeg", pcna_L, dpi = 300)
+
+ki67_L <- FeaturePlot(pLLP, features = c("mki67"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/ki67_L.jpeg", ki67_L, dpi = 300)
+
+#leading pLLP cells
+lef1_L <- FeaturePlot(pLLP, features = c("lef1"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/lef1_L.jpeg", lef1_L, dpi = 300)
+
+wnt10a_L <- FeaturePlot(pLLP, features = c("wnt10a"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ ggsave("outputs/wnt10a_L.jpeg", wnt10a_L, dpi = 300)
+ 
+#trailing pLLP cells
+krt15_L <- FeaturePlot(pLLP, features = c("krt15"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/krt15_L.jpeg", krt15_L, dpi = 300)
+
+ackr3b_L <- FeaturePlot(pLLP, features = c("ackr3b"), order = T,
+            min = 0.1,
+            pt.size = 0.5)+ NoAxes()+coord_equal()
+ggsave("outputs/ackr3b_L.jpeg", ackr3b_L, dpi = 300)
+
+```
+
+# Analysis of clusters
+
+## 'Automatic' subset and analysis a particular cluster
+
+```{r}
+#Set the subset cluster(s) that you're interested in
+subset_cluster_id <- c(0,7,9)
+
+##
+##The code below is designed to run automatically once the subset ids are selected above
+##
+
+print('Running automated ~analysis~ on the following clusters:')
+print(subset_cluster_id)
+
+#Pull the subset
+pllP_subset <- subset(pLLP, subset = seurat_clusters %in% subset_cluster_id)
+#stash the original cluster identities
+pllP_subset@meta.data$original_seurat_clusters <- pllP_subset@meta.data$seurat_clusters
+
+#Perform relatively hands-free analysis of the selected clusters
+pllP_subset <- FindVariableFeatures(pllP_subset)
+pllP_subset <- RunPCA(pllP_subset)
+ElbowPlot(pllP_subset)
+
+pllP_subset <- FindNeighbors(pllP_subset, dims = 1:16)
+pllP_subset <- FindClusters(pllP_subset, resolution = .2)
+pllP_subset <- RunUMAP(pllP_subset, dims = 1:16)
+
+subset_plot1 <- DimPlot(pllP_subset, label = TRUE, label.size = 5, group.by = 'seurat_clusters')+
+  ggtitle('New clusters')+NoLegend()
+
+subset_plot2 <- DimPlot(pllP_subset, label = TRUE, label.size = 5, pt.size = 0.5, group.by = 'original_seurat_clusters')+
+  ggtitle('Original cluster identities')+NoLegend()
+
+subset_plot1+subset_plot2
+
+``` 
+
+
+```{r}
+#annotation for 16 dim and resolution 0.2
+
+new.cluster.ids2 <- c("followers", "leaders",  "prolif")
+names(new.cluster.ids2) <- levels(pllP_subset)
+pllP_subset_names <- RenameIdents(pllP_subset, new.cluster.ids2)
+subset_plot1_names <- DimPlot(pllP_subset_names, reduction = "umap", label = TRUE, label.size = 5, pt.size = 0.5) + NoLegend()+coord_equal()+
+  ggtitle('New clusters')
+subset_plot1_names
+subset_plot1_names+subset_plot2
+
+```
+
+#Differential gene expression in the pLLP
+```{r}
+
+pllP_markers <- FindAllMarkers(pllP_subset, only.pos = TRUE, logfc.threshold = 0.5)
+
+top_genes_per_cluster2 <- pllP_markers %>% group_by(cluster) %>%
+  top_n(n = 10, wt = avg_log2FC)
+
+DoHeatmap(pllP_subset, features = top_genes_per_cluster2$gene, size = 3)
+
+#compare leading versus trailing markers
+pllP.markers <- FindMarkers(pllP_subset, ident.1 = "1", ident.2 = "0",    min.diff.pct          = 0.25)
+
+# view and save results
+head(pllP.markers, n=10)
+write.csv(pllP.markers, file = "outputs/pllP_markers0vs1.csv")
+
+
+
+```
+
+# Directed analysis of pLLP cells
+```{r}
+#proliferation markers
+pcna <- FeaturePlot(pllP_subset, features = c('pcna'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/pcna.jpeg", pcna, dpi = 300)
+
+ki67 <- FeaturePlot(pllP_subset, features = c('mki67'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/ki67.jpeg", ki67, dpi = 300)
+
+#leading markers
+lef1 <- FeaturePlot(pllP_subset, features = c('lef1'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/lef1.jpeg", lef1, dpi = 300)
+
+wnt10a <- FeaturePlot(pllP_subset, features = c('wnt10a'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/wnt10a.jpeg", wnt10a, dpi = 300)
+
+notum1a <- FeaturePlot(pllP_subset, features = c('notum1a'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/notum1a.jpeg", notum1a, dpi = 300)
+
+#trailing markers
+etv4 <- FeaturePlot(pllP_subset, features = c('etv4'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/etv4.jpeg", etv4, dpi = 300)
+
+ackr3b <- FeaturePlot(pllP_subset, features = c('ackr3b'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/ackr3b.jpeg", ackr3b, dpi = 300)
+
+krt15 <- FeaturePlot(pllP_subset, features = c('krt15'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/krt15.jpeg", krt15, dpi = 300)
+
+#genes selected for further analysis 
+mcf2lb <- FeaturePlot(pllP_subset, features = c('mcf2lb'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/mcf2lb.jpeg", mcf2lb, dpi = 300)
+
+twf2b <- FeaturePlot(pllP_subset, features = c('twf2b'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/twf2b.jpeg", twf2b, dpi = 300)
+
+arhgef4 <- FeaturePlot(pllP_subset, features = c('arhgef4'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/arhgef4.jpeg", arhgef4, dpi = 300)
+
+fhdc1 <- FeaturePlot(pllP_subset, features = c('fhdc1'), order = T,
+            min = 0.1,
+            pt.size = 1)+ NoAxes()+coord_equal()
+ggsave("outputs/fhdc1.jpeg", fhdc1, dpi = 300)
+
+
+selected_genes <- c("mcf2lb", "twf2b", "arhgef4", "fhdc1")
+DotPlot(object = pllP_subset_names, features = selected_genes, dot.scale = 8, cols = c("blue", "red"))+ 
+    RotatedAxis()
+
+DoHeatmap(pllP_subset_names, features = selected_genes, size = 3)
+
+
+```
+
+##Dot plot genes that regulate actin dynamics
+```{r}
+# GTPases, GAPs, GEFs, and activators
+GTPase_GAPs_GEFs <- c("arap3", "iqgap1", "mcf2lb", "tiam1a", "net1", "arhgef1b",  "arhgef4", "arhgef12b", "arhgef16",
+                      "arhgap17a", "arhgap32a", "arhgap27l", "rnd3a", "amotl2a", "cdc42l", "dock6", "pak1",
+                      "rhoca", "rhoub",
+                      "phlda2",  "ran", "rap1b", "rras", "rac1a", "rhebl1", "rasgef1ba"
+                   )
+#actin binding 
+Actin_binding <- c("iqgap1", "lasp1", "mtss1", "pdlim1", "wipf2a", "wasf2", "waslb",  
+                   "cald1a", "cnn2", "cnn3a",
+                   "capza1a", "capzb", "capgb", "ctnna1", "flna",
+                   "gsnb", "gmfb", "myo1eb", "myo1cb", "myo5b", "myh9a", "myh9b", "phactr4a",
+                   "pls3", "pleca", "plecb", "si:dkey-238i5.2", "tln1", "tln2a", "tagln2", 
+                   "tpm3", "tpm4a", "twf2b", "utrn", "fhdc1"
+                   )
+#actin polymerization 
+Actin_polymerization <- c("arpc1a", "arpc2", "arpc3", "arpc4", "arpc4l", "arpc5a", "cotl1",
+                          "cyfip1", "dbnla", "fam49ba"
+                          )
+
+DotPlot(object = pllP_subset_names, features = GTPase_GAPs_GEFs, dot.scale = 8, cols = c("blue", "red"))+ 
+    RotatedAxis()
+
+DotPlot(object = pllP_subset_names, features = Actin_binding, dot.scale = 8, cols = c("blue", "red"))+ 
+    RotatedAxis()
+
+DotPlot(object = pllP_subset_names, features = Actin_polymerization, dot.scale = 8, cols = c("blue", "red"))+ 
+    RotatedAxis()
+
+DoHeatmap(pllP_subset_names, features = GTPase_GAPs_GEFs, size = 3)
+DoHeatmap(pllP_subset_names, features = Actin_binding, size = 3)
+DoHeatmap(pllP_subset_names, features = Actin_polymerization, size = 3)
+
+```
+
+# NEW: 12/19/22
+
+## Cluster optimization
+
+### Cluster optimization function
+
+```{r}
+library(bluster)
+
+cluster_qc <- function(seurat_object, embedding, ndims = ncol(embedding)){
+  
+  unique_clusterings <- grep(colnames(seurat_object@meta.data),
+                                 pattern = '*_res.',
+                                 value = TRUE)
+  
+  clust_assignments <- seurat_object@meta.data %>%
+    dplyr::select(all_of(unique_clusterings))
+  
+  
+  for(i in 1:ncol(clust_assignments)){
+    
+    curr_resolution <- str_remove(unique_clusterings[i],
+                                  pattern = paste0(DefaultAssay(seurat_object), '_snn_res.')) %>%
+      as.numeric()
+    
+    p1 <- DimPlot(seurat_object,
+                  group.by = unique_clusterings[i],
+                  label = TRUE)+
+      coord_equal()+
+      ggtitle(unique_clusterings[i])
+    
+    print(p1)
+    
+    curr_clusters <- clust_assignments[,i]
+    
+    sil <- approxSilhouette(x = embedding,
+                            clusters = curr_clusters)
+    
+    boxplot(split(sil$width, curr_clusters),
+            main = paste0('Resolution: ', curr_resolution, '\n Mean sil.width: ', mean(sil$width)))
+    
+    best.choice <- ifelse(sil$width > 0,
+                          curr_clusters,
+                          sil$other)
+    
+    table(Assigned=curr_clusters, Closest=best.choice)
+    
+    # 
+    rmsd <- clusterRMSD(embedding, curr_clusters)
+    barplot(rmsd,
+            main = paste0('Resolution: ', curr_resolution, '\n Mean rmsd: ', mean(rmsd)))
+    
+    
+    curr_qc <- tibble(res = curr_resolution,
+                   n_clusters = length(unique(sil$cluster)),
+                   mean_sil_width = mean(sil$width),
+                   mean_rmsd = mean(rmsd))
+    
+    if(i == 1){
+      qc <- curr_qc
+    }else{
+      qc <- rbind(qc, curr_qc)
+    }
+    
+  }
+  return(qc)
+}
+```
+
+### Cluster sweep on full data
+
+```{r}
+# Cluster at multiple resolutions
+
+pLLP_sweep <- FindClusters(
+  object = pLLP,
+  resolution = seq(from = 0.1, to = 1, by = 0.1)
+)
+
+# Compute clustering statistics at every resolution and plot
+so_cluster_qc <- cluster_qc(seurat_object = pLLP_sweep,
+                            embedding = pLLP_sweep@reductions$pca@cell.embeddings[,1:20])
+
+# Visualize RMSE/Sil.Width/n_clusters
+cluster_qc_gathered <- so_cluster_qc %>%
+  gather(- c(res), value = 'value', key = 'metric')
+
+ggplot(cluster_qc_gathered, aes(x = res, y = value, color = metric))+
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 3, scales = 'free_y')+
+  scale_x_continuous(breaks = seq(from = 0, to = 2.5, by = 0.5))+
+  xlab('Louvain resolution')+
+  geom_vline(xintercept = 0.7, linetype = 'dashed')
+
+ggplot(so_cluster_qc, aes(x = mean_sil_width, y = mean_rmsd, label = res, color = n_clusters))+
+  geom_point()+
+  ggrepel::geom_text_repel()+
+  theme_bw()
+
+ggplot(so_cluster_qc, aes(x = n_clusters, y = mean_sil_width/mean_rmsd, label = res, color = n_clusters))+
+  geom_point()+
+  ggrepel::geom_text_repel()+
+  theme_bw()
+
+# Plot optimal vs original
+DimPlot(pLLP_sweep,
+        label = TRUE,
+        group.by = 'RNA_snn_res.0.7')+
+  coord_equal()
+
+DimPlot(pLLP_sweep,
+        label = TRUE,
+        group.by = 'RNA_snn_res.0.8')+
+  coord_equal()
+
+# Cross tabulate
+cross_tab <- pLLP_sweep@meta.data %>%
+  mutate(old_clust = paste0(RNA_snn_res.0.8, ' (old)')) %>%
+  mutate(new_clust = paste0(RNA_snn_res.0.7, ' (new)')) %>%
+  dplyr::select(old_clust, new_clust) %>%
+  table()
+
+pheatmap::pheatmap(cross_tab,
+                   display_numbers = cross_tab)
+
+# Compute NMI of old/new
+aricode::NMI(c1 = pLLP_sweep@meta.data$RNA_snn_res.0.7,
+             c2 = pLLP_sweep@meta.data$RNA_snn_res.0.8)
+
+```
+
+
+### Cluster sweep on subset
+
+```{r}
+
+# Cluster at multiple resolutions
+
+pllP_subset_sweep <- FindClusters(
+  object = pllP_subset,
+  resolution = seq(from = 0.1, to = 1, by = 0.1)
+)
+
+# Compute clustering statistics at every resolution and plot
+so_cluster_qc <- cluster_qc(seurat_object = pllP_subset_sweep,
+                            embedding = pllP_subset_sweep@reductions$pca@cell.embeddings[,1:16])
+
+# Visualize RMSE/Sil.Width/n_clusters
+cluster_qc_gathered <- so_cluster_qc %>%
+  gather(- c(res), value = 'value', key = 'metric')
+
+ggplot(cluster_qc_gathered, aes(x = res, y = value, color = metric))+
+  geom_point()+
+  geom_line()+
+  theme_bw()+
+  facet_wrap(~metric, ncol = 3, scales = 'free_y')+
+  scale_x_continuous(breaks = seq(from = 0, to = 2.5, by = 0.5))+
+  xlab('Louvain resolution')+
+  geom_vline(xintercept = 0.7, linetype = 'dashed')
+
+ggplot(so_cluster_qc, aes(x = mean_sil_width, y = mean_rmsd, label = res, color = n_clusters))+
+  geom_point()+
+  ggrepel::geom_text_repel()+
+  theme_bw()
+
+ggplot(so_cluster_qc, aes(x = n_clusters, y = mean_sil_width/mean_rmsd, label = res, color = n_clusters))+
+  geom_point()+
+  ggrepel::geom_text_repel()+
+  theme_bw()
+
+# Plot optimal vs original
+DimPlot(pllP_subset_sweep,
+        label = TRUE,
+        group.by = 'RNA_snn_res.0.2')+
+  coord_equal()
+
+DimPlot(pllP_subset_sweep,
+        label = TRUE,
+        group.by = 'RNA_snn_res.0.3')+
+  coord_equal()
+
+# Cross tabulate
+cross_tab <- pllP_subset_sweep@meta.data %>%
+  mutate(old_clust = paste0(RNA_snn_res.0.2, ' (old)')) %>%
+  mutate(new_clust = paste0(RNA_snn_res.0.3, ' (new)')) %>%
+  dplyr::select(old_clust, new_clust) %>%
+  table()
+
+pheatmap::pheatmap(cross_tab,
+                   display_numbers = cross_tab)
+
+# Compute NMI of old/new
+aricode::NMI(c1 = pllP_subset_sweep@meta.data$RNA_snn_res.0.2,
+             c2 = pllP_subset_sweep@meta.data$RNA_snn_res.0.3)
+
+```
+
+
+# GO module scoring
+
+```{r}
+library(GO.db)
+library(biomaRt)
+library(clusterProfiler)
+library(org.Dr.eg.db)
+
+library(org.Dr.eg.db)
+```
+
+## Function to pull genelist from term
+```{r}
+# Read csv file of go terms of interest 
+# csv should have at least two columns:
+### 'go_term' has the exact go term string
+### 'nickname' has some reference string describing that go term
+go_toi <- read_csv('go_terms_of_interest.csv') %>%
+  mutate(nickname = janitor::make_clean_names(nickname)) # This cleans the nickname column so we can use those nicknames in our list
+
+# Function to pull gene symbols from GO term using org.DR.eg
+go_to_symbol <- function(term){
+  allegs <- unique(get(term, org.Dr.egGO2ALLEGS))
+  esids <- unlist(mget(allegs, org.Dr.egSYMBOL))
+  return(esids)
+}
+
+# Run fucntion across go terms of interest and store as list
+go_list <- lapply(X = go_toi$go_term,
+      FUN = go_to_symbol)
+
+# Use Seurat's "AddModuleScore" function to score each go gene list
+# Note: module score for each cell is stored in seurat_object@meta.data matrix, we add the prefix 'GO_' to each nickname from go_toi.csv to create module score name
+pllP_subset_names <- AddModuleScore(pllP_subset_names,
+                       features = go_list,
+                       name = paste0('GO_', go_toi$nickname))
+
+
+# Pull module score names from @meta.data
+ms_names <- grep(x = colnames(pllP_subset_names@meta.data),
+                        pattern = '^GO',
+                        value = TRUE)
+```
+
+## Visualize results with violing plot
+```{r, fig.asp = 3}
+VlnPlot(pllP_subset_names,
+        features = ms_names,
+        ncol = 2)
+```
+
+## Visualize with heatmap
+
+```{r, fig.asp = 1}
+module_score_averages <- pllP_subset_names@meta.data %>%
+  dplyr::select(c(seurat_clusters, ms_names)) %>%
+  group_by(seurat_clusters) %>%
+  summarize_all(mean)
+
+
+ms_averages_df <- as.data.frame(module_score_averages[-1],
+              row.names = module_score_averages$seurat_clusters)
+
+pheatmap::pheatmap(ms_averages_df, treeheight_row = 0, treeheight_col = 0, cellheight = 20, cellwidth = 20)
+```
+
+
+# SessionInfo
+```{r}
+sessionInfo()
+```
+
+
+
+
+
